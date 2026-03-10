@@ -352,6 +352,7 @@ class VibeVoiceCollator:
 
         return {
             "input_ids": input_ids_tensor,
+            "labels": input_ids_tensor.clone(),
             "attention_mask": attention_mask_tensor,
             "speech_tensors": speech_tensors_tensor,
             "speech_masks": speech_masks_tensor,

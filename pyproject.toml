@@ -33,7 +33,11 @@ dependencies = [
     "absl-py",
     "gradio",
     "av",
-    "aiortc"
+    "aiortc",
+    "unsloth>=2026.1.2",
+    "unsloth-zoo>=2026.1.2",
+    "tensorboardx>=2.6.4",
+    "tensorboard>=2.20.0",
 ]
 
 
