@@ -151,7 +151,9 @@ class VibeVoiceForConditionalGenerationInference(VibeVoicePreTrainedModel, Gener
         with torch.no_grad():
             if speech_type == "audio":
                 # Encode audio to acoustic latents
-                encoder_output = self.model.acoustic_tokenizer.encode(speech_tensors.unsqueeze(1))[0][0]
+                encoder_output = self.model.acoustic_tokenizer.encode(speech_tensors.unsqueeze(1))
+                if isinstance(encoder_output, list):
+                    encoder_output = encoder_output[0][0]
                 acoustic_latents = encoder_output.sample(dist_type=self.model.acoustic_tokenizer.std_dist_type)[0]
                 
                 # Apply scaling and bias
