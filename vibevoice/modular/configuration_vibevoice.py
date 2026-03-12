@@ -6,6 +6,7 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 
 from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
+from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
 
 logger = logging.get_logger(__name__)
 
@@ -167,7 +168,7 @@ class VibeVoiceConfig(PretrainedConfig):
     sub_configs = {
         "acoustic_tokenizer_config": VibeVoiceAcousticTokenizerConfig, 
         "semantic_tokenizer_config": VibeVoiceSemanticTokenizerConfig,
-        "decoder_config": Qwen2Config,
+        "decoder_config": (Qwen2Config, Qwen3Config),
         "diffusion_head_config": VibeVoiceDiffusionHeadConfig,
     }
     # keys_to_ignore_at_inference = ["past_key_values"]
@@ -213,15 +214,17 @@ class VibeVoiceConfig(PretrainedConfig):
             self.semantic_tokenizer_config = semantic_tokenizer_config
 
         if decoder_config is None:
-            self.decoder_config = self.sub_configs["decoder_config"]()
+            self.decoder_config = Qwen2Config()
         elif isinstance(decoder_config, dict):
             # If a dictionary is provided, instantiate the config class with it
             # self.decoder_config = self.sub_configs["decoder_config"](**decoder_config)
             if decoder_config.get("model_type", '') == "qwen2":
                 self.decoder_config = Qwen2Config(**decoder_config)
+            elif decoder_config.get("model_type", '') == "qwen3":
+                self.decoder_config = Qwen3Config(**decoder_config)
             else:
                 raise ValueError(f"Unsupported decoder model type: {decoder_config.get('model_type', '')}")
-        elif isinstance(decoder_config, (Qwen2Config,)):
+        elif isinstance(decoder_config, (Qwen2Config, Qwen3Config)):
             # If an instance of the config class is provided
             self.decoder_config = decoder_config
 

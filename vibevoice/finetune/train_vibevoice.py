@@ -3,14 +3,14 @@ import logging
 import os
 import random
 import sys
+from unsloth import FastLanguageModel
+from unsloth.kernels import fast_cross_entropy_loss
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from tqdm import tqdm
 from trl import SFTTrainer
-from unsloth import FastLanguageModel
-from unsloth.kernels import fast_cross_entropy_loss
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -1209,10 +1209,11 @@ def main() -> None:
 
     if data_args.validation_jsonl or (data_args.eval_inference_text and data_args.eval_inference_voice_prompt):
         eval_text = data_args.eval_inference_text
-        if os.path.isfile(eval_text):
+        if eval_text and os.path.isfile(eval_text):
             with open(eval_text, "r", encoding="utf-8") as f:
                 eval_text = f.read().strip()
-        voice_paths = [p.strip() for p in data_args.eval_inference_voice_prompt.split(",")]
+        voice_prompt_str = data_args.eval_inference_voice_prompt or ""
+        voice_paths = [p.strip() for p in voice_prompt_str.split(",") if p.strip()]
         inference_cb = InferenceEvalCallback(
             processor=processor,
             eval_text=eval_text,

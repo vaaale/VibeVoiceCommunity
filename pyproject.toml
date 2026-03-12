@@ -39,7 +39,6 @@ dependencies = [
     "tensorboardx>=2.6.4",
     "tensorboard>=2.20.0",
     "setuptools>=82.0.1",
-    "flash-attn",
 ]
 
 
@@ -49,6 +48,4 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-
-[tool.uv.sources]
-flash-attn = { path = "flash_attn-2.8.3+cu12torch2.6cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }
+#flash-attn = { path = "flash_attn-2.8.3+cu12torch2.6cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }
