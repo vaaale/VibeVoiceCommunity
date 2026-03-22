@@ -1,0 +1,94 @@
+#########
+# VibeVoice Qwen3-0.6B Stage 2: LLM + Connectors + Embeddings
+# Diffusion head frozen (acts as anchor)
+# Goal: Co-adapt LLM hidden states with the connector mapping learned in Stage 1
+#########
+
+# Model configuration
+#model_name_or_path: /mnt/storage/Models/Vibevoice/vibevoice-qwen3-0.6b/norwegian-qwen3-try2-stage2/checkpoint-4800/
+model_name_or_path: /mnt/storage/Models/VibeVoice-Qwen3/norwegian-qwen3-base
+resume_from_checkpoint: /mnt/storage/Models/Vibevoice/vibevoice-qwen3-0.6b/norwegian-qwen3-try2-stage3.7/checkpoint-30
+#init_from_checkpoint: /mnt/storage/Models/Vibevoice/vibevoice-qwen3-0.6b/norwegian-qwen3-try2-stage3.6/checkpoint-25
+output_dir: /mnt/storage/Models/Vibevoice/vibevoice-qwen3-0.6b/norwegian-qwen3-try2-stage3.7
+processor_name_or_path: ./vibevoice/processor_qwen3_0.6b/
+bf16: true
+remove_unused_columns: false
+eval_on_start: false
+
+# Tokenizer/model freezing
+freeze_acoustic_tokenizer: true
+freeze_semantic_tokenizer: true
+
+# LLM: unfrozen (co-adapts hidden states for speech)
+freeze_language_model: false
+
+# Embeddings/LM head: trained
+train_embeddings: true
+
+# Connectors: trained (continues refining the mapping)
+train_connectors: true
+
+# Diffusion head: frozen (anchor — forces LLM+connectors to produce correct conditioning)
+lora_wrap_diffusion_head: false
+train_diffusion_head: true
+
+max_length: 5500
+gradient_checkpointing: true
+
+eval_inference_cfg_scale: 1.5
+
+# Training hyperparameters
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 2048
+voice_prompt_drop_rate: 0.15
+
+ddpm_batch_mul: 4
+# Loss weights
+diffusion_loss_weight: 0.5
+ce_loss_weight: 1.0
+
+# Learning rates — conservative for LLM, moderate for connectors
+diffusion_learning_rate: 2.0e-5
+llm_learning_rate: 2.0e-5
+connectors_learning_rate: 1.0e-5
+learning_rate: 1.0e-5
+
+lr_scheduler_type: cosine
+warmup_ratio: 0.01
+num_train_epochs: 10
+
+# Data configuration
+#train_jsonl: /mnt/storage/Datasets/VibeVoice-WolfgangWee/dataset_vibevoice.jsonl
+train_jsonl: ./exp3_clean.jsonl
+text_column_name: text
+audio_column_name: audio
+
+# Logging
+logging_strategy: steps
+logging_steps: 1
+report_to: tensorboard
+
+# Evaluation
+validation_jsonl: ./test-cleaned.jsonl
+eval_strategy: steps
+eval_steps: 5
+eval_inference_text: /home/alex/PycharmProjects/VibeVoiceCommunity/demo/text_examples/2p_no_eval1.txt
+eval_inference_voice_prompt: /home/alex/PycharmProjects/VibeVoiceCommunity/demo/voices/no-Stress4_woman.wav,/home/alex/PycharmProjects/VibeVoiceCommunity/demo/voices/no-Stress5_woman.wav
+
+# Checkpointing
+save_strategy: steps
+save_steps: 5
+save_total_limit: 50
+
+debug_ce_details: false
+debug_ce_topk: 5
+debug_ce_max_examples: 1
+debug_ce_every_n_steps: 100
+
+gradient_clipping: true
+max_grad_norm: 1.0
+
+# Training flags
+do_train: true
+do_eval: true
+dataloader_num_workers: 4

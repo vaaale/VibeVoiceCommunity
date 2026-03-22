@@ -3,6 +3,8 @@ import logging
 import os
 import random
 import sys
+
+import librosa
 from unsloth import FastLanguageModel
 from unsloth.kernels import fast_cross_entropy_loss
 from dataclasses import dataclass, field
@@ -97,7 +99,21 @@ class EmaCallback(TrainerCallback):
             mod = getattr(mod, name)
         return mod
 
+    def save_shadow(self, path: str) -> None:
+        """Persist EMA shadow state to *path* so it can be restored on resume."""
+        if self.shadow is not None:
+            torch.save(self.shadow, path)
+
+    def load_shadow(self, path: str) -> bool:
+        """Restore EMA shadow state from *path*. Returns True on success."""
+        if os.path.isfile(path):
+            self.shadow = torch.load(path, map_location=self.device, weights_only=True)
+            return True
+        return False
+
     def on_train_begin(self, args, state, control, model=None, **kwargs):
+        if self.shadow is not None:
+            return
         head = self._get_module(model)
         self.shadow = {k: p.detach().to(self.device).clone()
                        for k, p in head.state_dict().items()}
@@ -132,7 +148,8 @@ class InferenceEvalCallback(TrainerCallback):
     SAMPLE_RATE = 24000
 
     def __init__(self, processor, voice_prompt_paths: List[str],
-                 cfg_scale: float = 1.3, eval_file: Path | str | None = None, eval_text: str | None = None, eval_on_start: bool = True):
+                 cfg_scale: float = 1.3, eval_file: Path | str | None = None, eval_text: str | None = None,
+                 eval_on_start: bool = True, ema_callback: Optional["EmaCallback"] = None):
         self.processor = processor
         self.eval_text = eval_text
         self.voice_prompt_paths = voice_prompt_paths
@@ -141,6 +158,7 @@ class InferenceEvalCallback(TrainerCallback):
         self._inference_model = None
         self._tb_writer = None
         self.eval_on_start = eval_on_start
+        self.ema_callback = ema_callback
 
     def _get_inference_model(self, training_model):
         """Build a zero-copy inference wrapper that shares the training model's modules."""
@@ -224,6 +242,13 @@ class InferenceEvalCallback(TrainerCallback):
         else:
             return
 
+        # Determine which variants to generate
+        ema_cb = self.ema_callback
+        has_ema = ema_cb is not None and ema_cb.shadow is not None
+        variants = [("train", False)]  # (label, swap_ema)
+        if has_ema:
+            variants.append(("ema", True))
+
         for i, sample in tqdm(enumerate(samples), total=len(samples)):
             eval_text = sample["text"]
             voice_prompt_paths = sample["voice_prompts"]
@@ -239,54 +264,66 @@ class InferenceEvalCallback(TrainerCallback):
                 if torch.is_tensor(v):
                     inputs[k] = v.to(device)
 
-            # Temporarily restore unpatched encode for inference (.sample() support)
-            at = inf_model.model.acoustic_tokenizer
-            patched_encode = getattr(at, 'encode', None)
-            base_encode = getattr(at, '_base_encode', None)
-            if base_encode is not None:
-                at.encode = base_encode
-            try:
-                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    outputs = inf_model.generate(
-                        **inputs,
-                        max_new_tokens=None,
-                        cfg_scale=self.cfg_scale,
-                        tokenizer=self.processor.tokenizer,
-                        generation_config={"do_sample": False},
-                        verbose=False,
-                    )
-            finally:
-                if base_encode is not None and patched_encode is not None:
-                    at.encode = patched_encode
+            for variant_label, swap_ema in variants:
+                if swap_ema:
+                    ema_cb._swap_in_ema(model)
+                try:
+                    self._generate_and_log(inf_model, inputs, eval_text, args, state, i, variant_label)
+                finally:
+                    if swap_ema and ema_cb._orig is not None:
+                        ema_cb._swap_back(model)
 
-            if prev_use_cache is not None:
-                inf_model.config.use_cache = prev_use_cache
+        if prev_use_cache is not None:
+            inf_model.config.use_cache = prev_use_cache
 
-            if not outputs.speech_outputs or outputs.speech_outputs[0] is None:
-                logger.warning("Eval inference produced no audio")
-                continue
+    @torch.no_grad()
+    def _generate_and_log(self, inf_model, inputs, eval_text, args, state, sample_idx, variant_label):
+        """Run generation for a single variant (train or ema) and save / log the result."""
+        # Temporarily restore unpatched encode for inference (.sample() support)
+        at = inf_model.model.acoustic_tokenizer
+        patched_encode = getattr(at, 'encode', None)
+        base_encode = getattr(at, '_base_encode', None)
+        if base_encode is not None:
+            at.encode = base_encode
+        try:
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                outputs = inf_model.generate(
+                    **inputs,
+                    max_new_tokens=None,
+                    cfg_scale=self.cfg_scale,
+                    tokenizer=self.processor.tokenizer,
+                    generation_config={"do_sample": False},
+                    verbose=False,
+                )
+        finally:
+            if base_encode is not None and patched_encode is not None:
+                at.encode = patched_encode
 
-            audio_tensor = outputs.speech_outputs[0]
+        if not outputs.speech_outputs or outputs.speech_outputs[0] is None:
+            logger.warning(f"Eval inference ({variant_label}) produced no audio")
+            return
 
-            step = state.global_step
-            audio_dir = os.path.join(args.output_dir, "eval_audio")
-            os.makedirs(audio_dir, exist_ok=True)
-            wav_path = os.path.join(audio_dir, f"step_{step:06d}_{i}.wav")
-            self.processor.save_audio(audio_tensor, output_path=wav_path)
-            logger.info(f"Eval inference audio saved to {wav_path}")
+        audio_tensor = outputs.speech_outputs[0]
 
-            with Path(wav_path).with_suffix(".txt").open("w") as f:
-                f.write(eval_text)
+        step = state.global_step
+        audio_dir = os.path.join(args.output_dir, "eval_audio")
+        os.makedirs(audio_dir, exist_ok=True)
+        wav_path = os.path.join(audio_dir, f"step_{step:06d}_{sample_idx}_{variant_label}.wav")
+        self.processor.save_audio(audio_tensor, output_path=wav_path)
+        logger.info(f"Eval inference audio ({variant_label}) saved to {wav_path}")
 
-            tb = self._get_tb_writer(args)
-            if tb is not None:
-                audio_np = audio_tensor.cpu().float().numpy()
-                if audio_np.ndim > 1:
-                    audio_np = audio_np.squeeze()
-                tb.add_audio(f"eval/inference_audio_{i}", audio_np, global_step=step,
-                             sample_rate=self.SAMPLE_RATE)
-                tb.flush()
-                logger.info(f"Logged eval inference audio to TensorBoard (step {step})")
+        with Path(wav_path).with_suffix(".txt").open("w") as f:
+            f.write(eval_text)
+
+        tb = self._get_tb_writer(args)
+        if tb is not None:
+            audio_np = audio_tensor.cpu().float().numpy()
+            if audio_np.ndim > 1:
+                audio_np = audio_np.squeeze()
+            tb.add_audio(f"eval/inference_audio_{sample_idx}_{variant_label}", audio_np, global_step=step,
+                         sample_rate=self.SAMPLE_RATE)
+            tb.flush()
+            logger.info(f"Logged eval inference audio ({variant_label}) to TensorBoard (step {step})")
 
 
 @dataclass
@@ -795,6 +832,8 @@ def main() -> None:
         audio_column=data_args.audio_column_name,
         voice_prompts_column=data_args.voice_prompts_column_name,
     )
+
+
     eval_dataset = None
     if eval_ds is not None:
         eval_dataset = VibeVoiceDataset(
@@ -1291,9 +1330,6 @@ def main() -> None:
         # --------- CHECKPOINT SAVE/LOAD ---------
 
         def _save(self, output_dir: Optional[str] = None, state_dict=None) -> None:
-            ema_cb = self._get_ema_callback()
-            if ema_cb and ema_cb.shadow is not None:
-                ema_cb._swap_in_ema(self.model)
             try:
                 target_dir = output_dir or self.args.output_dir
                 os.makedirs(target_dir, exist_ok=True)
@@ -1304,9 +1340,18 @@ def main() -> None:
 
                 # Always save the full model. Use nn.Module.state_dict() to
                 # bypass any PEFT filtering so all weights are included.
+                # We save the actual training weights (NOT EMA) so that
+                # the optimizer state remains consistent on resume.
                 save_sd = state_dict if state_dict is not None else nn.Module.state_dict(unwrapped)
                 unwrapped.save_pretrained(target_dir, state_dict=save_sd, safe_serialization=True)
                 logger.info(f"Full model saved to {target_dir}")
+
+                # Save EMA shadow separately so it can be restored on resume
+                ema_cb = self._get_ema_callback()
+                if ema_cb and ema_cb.shadow is not None:
+                    ema_path = os.path.join(target_dir, "ema_shadow.pt")
+                    ema_cb.save_shadow(ema_path)
+                    logger.info(f"EMA shadow saved to {ema_path}")
 
                 # Additionally save LoRA adapters if any component is PEFT-wrapped
                 lm = getattr(unwrapped.model, "language_model", None)
@@ -1367,9 +1412,6 @@ def main() -> None:
 
             except Exception as e:
                 logger.warning(f"Failed to save model: {e}")
-            finally:
-                if ema_cb and ema_cb._orig is not None:
-                    ema_cb._swap_back(self.model)
 
         def _load_from_checkpoint(self, resume_from_checkpoint, model=None):
             target_model = model if model is not None else self.model
@@ -1382,6 +1424,15 @@ def main() -> None:
             if has_full_model:
                 super()._load_from_checkpoint(resume_from_checkpoint, model=target_model)
                 logger.info(f"Loaded model checkpoint from {resume_from_checkpoint}")
+
+                # Restore EMA shadow if saved alongside the checkpoint
+                ema_cb = self._get_ema_callback()
+                if ema_cb is not None:
+                    ema_path = os.path.join(resume_from_checkpoint, "ema_shadow.pt")
+                    if ema_cb.load_shadow(ema_path):
+                        logger.info(f"Restored EMA shadow from {ema_path}")
+                    else:
+                        logger.info("No ema_shadow.pt in checkpoint; EMA will initialize from loaded weights on train_begin")
                 return
 
             # Legacy format: component-level saves under lora/ directory
@@ -1479,7 +1530,8 @@ def main() -> None:
             eval_file=data_args.validation_jsonl,
             voice_prompt_paths=voice_paths,
             cfg_scale=data_args.eval_inference_cfg_scale,
-            eval_on_start=training_args.eval_on_start
+            eval_on_start=training_args.eval_on_start,
+            ema_callback=callbacks[0],
         )
         callbacks.append(inference_cb)
         logger.info(f"Eval inference enabled: {len(voice_paths)} voice prompt(s), cfg_scale={data_args.eval_inference_cfg_scale}")
