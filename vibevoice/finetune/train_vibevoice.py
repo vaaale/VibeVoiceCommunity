@@ -1187,8 +1187,8 @@ def main() -> None:
                     raise NotImplementedError(f"Prediction type {prediction_type} not implemented")
 
                 diffusion_loss = F.mse_loss(model_output.float(), target_for_loss.float(), reduction='sum')
-                if latent_size > 0 and ddmp_batch_mul > 0:
-                    diffusion_loss = diffusion_loss / latent_size / ddmp_batch_mul
+                if latent_size > 0 and ddmp_batch_mul > 0 and speech_len > 0:
+                    diffusion_loss = diffusion_loss / latent_size / ddmp_batch_mul / speech_len
                 else:
                     diffusion_loss = torch.tensor(0.0, device=diffusion_loss.device)
             

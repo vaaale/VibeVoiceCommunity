@@ -7,7 +7,7 @@
 # Model configuration
 #model_name_or_path: /mnt/storage/Models/Vibevoice/vibevoice-qwen3-0.6b/norwegian-qwen3-try2-stage2/checkpoint-4800/
 model_name_or_path: /mnt/storage/Models/VibeVoice-Qwen3/norwegian-qwen3-base
-resume_from_checkpoint: /mnt/storage/Models/Vibevoice/vibevoice-qwen3-0.6b/norwegian-qwen3-try2-stage3.7/checkpoint-65
+resume_from_checkpoint: /mnt/storage/Models/Vibevoice/vibevoice-qwen3-0.6b/norwegian-qwen3-try2-stage3.7/checkpoint-120
 #init_from_checkpoint: /mnt/storage/Models/Vibevoice/vibevoice-qwen3-0.6b/norwegian-qwen3-try2-stage3.6/checkpoint-25
 output_dir: /mnt/storage/Models/Vibevoice/vibevoice-qwen3-0.6b/norwegian-qwen3-try2-stage3.7
 processor_name_or_path: ./vibevoice/processor_qwen3_0.6b/
@@ -44,7 +44,7 @@ voice_prompt_drop_rate: 0.15
 
 ddpm_batch_mul: 4
 # Loss weights
-diffusion_loss_weight: 0.9
+diffusion_loss_weight: 1.5
 ce_loss_weight: 1.0
 
 # Learning rates — conservative for LLM, moderate for connectors

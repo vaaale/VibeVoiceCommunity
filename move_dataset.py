@@ -4,7 +4,7 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-src = Path("./exp3.jsonl")
+src = Path("./exp3_clean.jsonl")
 dst = Path("/mnt/Datasets/VibeVoice/Podcast/vibevoice_dataset.jsonl")
 
 def main():
