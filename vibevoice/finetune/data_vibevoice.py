@@ -1,5 +1,7 @@
 import math
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -40,11 +42,19 @@ class VibeVoiceDataset:
         text_column: str = "text",
         audio_column: str = "audio",
         voice_prompts_column: Optional[str] = "voice_prompts",
+        base_dir: Optional[str] = None,
     ) -> None:
         self.dataset = dataset
         self.text_column = text_column
         self.audio_column = audio_column
         self.voice_prompts_column = voice_prompts_column
+        self.base_dir = Path(base_dir) if base_dir else None
+
+    def _resolve(self, path_str: str) -> str:
+        """Resolve a relative path against *base_dir* (the JSONL parent directory)."""
+        if self.base_dir is None or os.path.isabs(path_str):
+            return path_str
+        return str(self.base_dir / path_str)
 
     def __len__(self) -> int:
         return len(self.dataset)
@@ -53,7 +63,8 @@ class VibeVoiceDataset:
         item = self.dataset[idx]
         data: Dict[str, Any] = {}
         data["text"] = item[self.text_column]
-        data["audio"] = item[self.audio_column]
+        audio = item[self.audio_column]
+        data["audio"] = self._resolve(audio) if isinstance(audio, str) else audio
 
         user_provided_prompt = None
         if self.voice_prompts_column and self.voice_prompts_column in item:
@@ -62,9 +73,11 @@ class VibeVoiceDataset:
         if user_provided_prompt:
             # A prompt was provided in the dataset, so we use it.
             if not isinstance(user_provided_prompt, list):
-                data["voice_prompts"] = [user_provided_prompt]
-            else:
-                data["voice_prompts"] = user_provided_prompt
+                user_provided_prompt = [user_provided_prompt]
+            data["voice_prompts"] = [
+                self._resolve(p) if isinstance(p, str) else p
+                for p in user_provided_prompt
+            ]
         else:
             # FALLBACK: No prompt provided, so we auto-generate one from the target audio.
             try:
