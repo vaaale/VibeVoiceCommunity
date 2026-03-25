@@ -7,9 +7,9 @@
 # Model configuration
 #model_name_or_path: /mnt/storage/Models/Vibevoice/vibevoice-qwen3-0.6b/norwegian-qwen3-try2-stage2/checkpoint-4800/
 model_name_or_path: /mnt/storage/Models/VibeVoice-Qwen3/norwegian-qwen3-base
-resume_from_checkpoint: /mnt/storage/Models/Vibevoice/vibevoice-qwen3-0.6b/norwegian-qwen3-try2-stage3.7/checkpoint-120
-#init_from_checkpoint: /mnt/storage/Models/Vibevoice/vibevoice-qwen3-0.6b/norwegian-qwen3-try2-stage3.6/checkpoint-25
-output_dir: /mnt/storage/Models/Vibevoice/vibevoice-qwen3-0.6b/norwegian-qwen3-try2-stage3.7
+#resume_from_checkpoint: /mnt/storage/Models/Vibevoice/vibevoice-qwen3-0.6b/norwegian-qwen3-try2-stage3.7/checkpoint-275
+init_from_checkpoint: /mnt/storage/Models/Vibevoice/vibevoice-qwen3-0.6b/norwegian-qwen3-try2-stage3.8/checkpoint-45
+output_dir: /mnt/storage/Models/Vibevoice/vibevoice-qwen3-0.6b/norwegian-qwen3-try2-stage3.8
 processor_name_or_path: ./vibevoice/processor_qwen3_0.6b/
 bf16: true
 remove_unused_columns: false
@@ -38,17 +38,17 @@ gradient_checkpointing: true
 eval_inference_cfg_scale: 1.5
 
 # Training hyperparameters
-per_device_train_batch_size: 2
+per_device_train_batch_size: 1
 gradient_accumulation_steps: 2048
 voice_prompt_drop_rate: 0.15
 
-ddpm_batch_mul: 4
+ddpm_batch_mul: 8
 # Loss weights
-diffusion_loss_weight: 1.5
-ce_loss_weight: 1.0
+diffusion_loss_weight: 0.5
+ce_loss_weight: 2.0
 
 # Learning rates — conservative for LLM, moderate for connectors
-diffusion_learning_rate: 2.0e-5
+diffusion_learning_rate: 2.0e-6
 llm_learning_rate: 2.0e-5
 connectors_learning_rate: 1.0e-5
 learning_rate: 1.0e-5
@@ -60,6 +60,8 @@ num_train_epochs: 10
 # Data configuration
 #train_jsonl: /mnt/storage/Datasets/VibeVoice-WolfgangWee/dataset_vibevoice.jsonl
 #train_jsonl: ./exp3_clean.jsonl
+#precomputed_latents_dir: /mnt/Datasets/VibeVoice/PodcastLatents
+#precomputed_latents: true
 train_jsonl: /mnt/Datasets/VibeVoice/Podcast/vibevoice_dataset.jsonl
 text_column_name: text
 audio_column_name: audio

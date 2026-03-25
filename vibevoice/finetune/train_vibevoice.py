@@ -388,6 +388,12 @@ class DataArguments:
         default=1.3,
         metadata={"help": "CFG scale for eval inference generation."},
     )
+    precomputed_latents_dir: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to directory with precomputed latents (.npy files + latents_meta.json). "
+                          "When set, the training pipeline loads precomputed acoustic/semantic latents "
+                          "instead of running the frozen tokenizer encoders on every step."},
+    )
 
 
 @dataclass
@@ -827,14 +833,41 @@ def main() -> None:
             train_ds, eval_ds = split["train"], split["test"]
 
     train_base_dir = str(Path(data_args.train_jsonl).parent) if data_args.train_jsonl else None
+    precomputed_dir = data_args.precomputed_latents_dir
+
+    # If a precomputed latents directory is set, load the HF Dataset from disk
+    # and use it instead of the JSONL-loaded dataset.
+    if precomputed_dir is not None:
+        from datasets import load_from_disk
+        ds_path = os.path.join(precomputed_dir, "dataset")
+        logger.info(f"Loading precomputed HF Dataset from {ds_path}")
+        precomputed_full = load_from_disk(ds_path)
+
+        if training_args.do_eval and data_args.eval_split_size and data_args.eval_split_size > 0 and len(precomputed_full) > 1:
+            split = precomputed_full.train_test_split(test_size=data_args.eval_split_size, seed=training_args.seed)
+            train_ds, eval_ds = split["train"], split["test"]
+        else:
+            train_ds = precomputed_full
+            # Keep eval_ds from earlier JSONL-based loading if it exists
+
+    # Ratios/dims from processor+model
+    speech_compress_ratio = getattr(processor, "speech_tok_compress_ratio", 3200)
+    semantic_dim = getattr(model.config, "semantic_vae_dim", None)
+    if semantic_dim is None:
+        try:
+            semantic_dim = int(getattr(model.config.semantic_tokenizer_config, "vae_dim", 128))
+        except Exception:
+            semantic_dim = 128
+    acoustic_dim = getattr(model.config, "acoustic_vae_dim", 64)
+
     train_dataset = VibeVoiceDataset(
         train_ds,
         text_column=data_args.text_column_name,
         audio_column=data_args.audio_column_name,
         voice_prompts_column=data_args.voice_prompts_column_name,
         base_dir=train_base_dir,
+        speech_compress_ratio=speech_compress_ratio,
     )
-
 
     eval_dataset = None
     if eval_ds is not None:
@@ -845,16 +878,25 @@ def main() -> None:
             audio_column=data_args.audio_column_name,
             voice_prompts_column=data_args.voice_prompts_column_name,
             base_dir=eval_base_dir,
+            speech_compress_ratio=speech_compress_ratio,
         )
 
-    # Ratios/dims from processor+model
-    speech_compress_ratio = getattr(processor, "speech_tok_compress_ratio", 3200)
-    semantic_dim = getattr(model.config, "semantic_vae_dim", None)
-    if semantic_dim is None:
-        try:
-            semantic_dim = int(getattr(model.config.semantic_tokenizer_config, "vae_dim", 128))
-        except Exception:
-            semantic_dim = 128
+    # If precomputed latents are available, load scaling factors and set them on the model
+    if precomputed_dir is not None:
+        meta_path = os.path.join(precomputed_dir, "latents_meta.json")
+        if os.path.isfile(meta_path):
+            with open(meta_path, "r") as f:
+                latents_meta = json.load(f)
+            sf = latents_meta["scaling_factor"]
+            bf = latents_meta["bias_factor"]
+            model.model.speech_scaling_factor.copy_(torch.tensor(sf))
+            model.model.speech_bias_factor.copy_(torch.tensor(bf))
+            logger.info(f"Loaded precomputed scaling_factor={sf:.6f}, bias_factor={bf:.6f} from {meta_path}")
+        else:
+            logger.warning(
+                f"precomputed_latents_dir={precomputed_dir} set but no latents_meta.json found. "
+                "Scaling factors will be computed from the first batch (slower first step)."
+            )
 
     compute_semantics_flag = hasattr(processor, "semantic_tokenizer") and processor.semantic_tokenizer is not None
 
@@ -863,6 +905,7 @@ def main() -> None:
         max_length=data_args.max_length,
         speech_compress_ratio=speech_compress_ratio,
         semantic_vae_dim=semantic_dim,
+        acoustic_vae_dim=acoustic_dim,
         compute_semantics=compute_semantics_flag,
         debug_checks=False,
         voice_prompt_drop_rate=data_args.voice_prompt_drop_rate,
@@ -1051,6 +1094,7 @@ def main() -> None:
             speech_semantic_tensors = inputs.get("speech_semantic_tensors")
             acoustic_input_mask = inputs.get("acoustic_input_mask")
             acoustic_loss_mask = inputs.get("acoustic_loss_mask")
+            precomputed_latents = inputs.get("precomputed_latents", False)
             ddmp_batch_mul = training_args.ddpm_batch_mul
             kwargs = {}
             
@@ -1067,8 +1111,51 @@ def main() -> None:
             if x.dtype != model_dtype:
                 x = x.to(dtype=model_dtype)
             semantic_speech_all_connect_features = model.model.semantic_connector(speech_semantic_tensors)
-            if speeches_loss_input is not None:
-                # only part audio need diffuse
+            if precomputed_latents and speech_tensors is not None:
+                # --- Precomputed path: speech_tensors is [segments, T, D] (acoustic means) ---
+                with torch.no_grad():
+                    acoustic_means = speech_tensors.type_as(x)
+                    fix_std = model.model.acoustic_tokenizer.fix_std
+                    std_dist_type = model.model.acoustic_tokenizer.std_dist_type
+                    if std_dist_type == 'gaussian':
+                        batch_size = acoustic_means.size(0)
+                        value = fix_std / 0.8
+                        std = torch.randn(batch_size, dtype=acoustic_means.dtype, device=acoustic_means.device) * value
+                        std = std.view(-1, 1, 1)
+                        audio_tokens = acoustic_means + std * torch.randn_like(acoustic_means)
+                    elif std_dist_type == 'fix':
+                        audio_tokens = acoustic_means + fix_std * torch.randn_like(acoustic_means)
+                    else:
+                        audio_tokens = acoustic_means
+
+                    # Apply scaling/bias (already set from latents_meta.json or first-batch init)
+                    if torch.isnan(model.model.speech_scaling_factor) or torch.isnan(model.model.speech_bias_factor):
+                        scaling_factor = 1. / audio_tokens[speech_masks].flatten().std()
+                        bias_factor = -audio_tokens[speech_masks].flatten().mean()
+                        if torch.distributed.is_available() and torch.distributed.is_initialized():
+                            torch.distributed.all_reduce(scaling_factor, op=torch.distributed.ReduceOp.SUM)
+                            torch.distributed.all_reduce(bias_factor, op=torch.distributed.ReduceOp.SUM)
+                            world_size = torch.distributed.get_world_size()
+                            model.model.speech_scaling_factor.copy_(scaling_factor / world_size)
+                            model.model.speech_bias_factor.copy_(bias_factor / world_size)
+                        else:
+                            model.model.speech_scaling_factor.copy_(scaling_factor)
+                            model.model.speech_bias_factor.copy_(bias_factor)
+                        logger.info(f"Precomputed path: initialized speech_scaling_factor={model.model.speech_scaling_factor.item():.6f}, "
+                                    f"speech_bias_factor={model.model.speech_bias_factor.item():.6f}")
+
+                    speech_all_features = (audio_tokens + model.model.speech_bias_factor) * model.model.speech_scaling_factor
+
+                speech_all_connect_features = model.model.acoustic_connector(speech_all_features)
+
+                if semantic_speech_all_connect_features is not None:
+                    x[acoustic_input_mask] = speech_all_connect_features[speech_masks] + semantic_speech_all_connect_features[speech_masks]
+                else:
+                    x[acoustic_input_mask] = speech_all_connect_features[speech_masks]
+                speech_features = speech_all_features[speeches_loss_input & speech_masks]
+                speech_connect_features = speech_all_connect_features[speeches_loss_input & speech_masks]
+            elif speeches_loss_input is not None:
+                # --- Original path: encode raw waveforms ---
                 speech_all_features, speech_all_connect_features = model.forward_speech_features(
                         speech_tensors=speech_tensors.type_as(x) if speech_tensors is not None else None,
                         speech_masks=speech_masks,
